@@ -498,10 +498,7 @@ function behavesLikeRibbonOptionsVault(params: {
 
       await setAssetPricer(collateralAsset, params.collateralPricer);
 
-      collateralPricerSigner = await getAssetPricer(
-        params.collateralPricer,
-        ownerSigner
-      );
+      collateralPricerSigner = await getAssetPricer(params.collateralPricer);
 
       // If mintable token, then mine the token
       if (params.mintConfig) {

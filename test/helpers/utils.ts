@@ -1,6 +1,5 @@
 import { ethers, network, artifacts } from "hardhat";
 import { increaseTo } from "./time";
-import WBTC_ABI from "../../constants/abis/WBTC.json";
 import ORACLE_ABI from "../../constants/abis/OpynOracle.json";
 import CHAINLINK_PRICER_ABI from "../../constants/abis/ChainLinkPricer.json";
 import SAVAX_PRICER_ABI from "../../constants/abis/SAvaxPricer.json";
@@ -22,7 +21,7 @@ import { SignerWithAddress } from "@nomiclabs/hardhat-ethers/dist/src/signers";
 import { BigNumber, BigNumberish, Contract } from "ethers";
 import { wmul } from "../helpers/math";
 
-const { provider } = ethers;
+const { provider, getContractAt } = ethers;
 const { parseEther } = ethers.utils;
 const chainId = network.config.chainId;
 
@@ -69,38 +68,7 @@ export async function parseLog(
   return event;
 }
 
-export async function mintAndApprove(
-  tokenAddress: string,
-  userSigner: SignerWithAddress,
-  spender: string,
-  amount: BigNumber
-) {
-  await network.provider.request({
-    method: "hardhat_impersonateAccount",
-    params: ["0xca06411bd7a7296d7dbdd0050dfc846e95febeb7"],
-  });
-  const wbtcMinter = await ethers.provider.getSigner(
-    "0xca06411bd7a7296d7dbdd0050dfc846e95febeb7"
-  );
-  const forceSendContract = await ethers.getContractFactory("ForceSend");
-  const forceSend = await forceSendContract.deploy(); // force Send is a contract that forces the sending of Ether to WBTC minter (which is a contract with no receive() function)
-  await forceSend.deployed();
-  await forceSend.go("0xca06411bd7a7296d7dbdd0050dfc846e95febeb7", {
-    value: parseEther("1"),
-  });
-
-  const WBTCToken = await ethers.getContractAt(WBTC_ABI, tokenAddress);
-  await WBTCToken.connect(wbtcMinter).mint(userSigner.address, amount);
-  await WBTCToken.connect(userSigner).approve(
-    spender,
-    amount.mul(BigNumber.from("10"))
-  );
-}
-
-export async function getAssetPricer(
-  pricer: string,
-  signer: SignerWithAddress
-) {
+export async function getAssetPricer(pricer: string) {
   await network.provider.request({
     method: "hardhat_impersonateAccount",
     params: [pricer],
@@ -110,9 +78,7 @@ export async function getAssetPricer(
 
   const pricerContract = await ethers.getContractAt("IYearnPricer", pricer);
 
-  const forceSendContract = await ethers.getContractFactory("ForceSend");
-  const forceSend = await forceSendContract.deploy(); // force Send is a contract that forces the sending of Ether to WBTC minter (which is a contract with no receive() function)
-  await forceSend.connect(signer).go(pricer, { value: parseEther("0.5") });
+  await forceSend(pricer, "0.5");
 
   return await pricerContract.connect(ownerSigner);
 }
@@ -180,11 +146,7 @@ export async function setupOracle(
   });
   const pricerSigner = await provider.getSigner(chainlinkPricer);
 
-  const forceSendContract = await ethers.getContractFactory("ForceSend");
-  const forceSend = await forceSendContract.deploy(); // force Send is a contract that forces the sending of Ether to WBTC minter (which is a contract with no receive() function)
-  await forceSend
-    .connect(signer)
-    .go(chainlinkPricer, { value: parseEther("1") });
+  await forceSend(chainlinkPricer, "1");
 
   const oracle = new ethers.Contract(
     GAMMA_ORACLE[chainId],
@@ -222,8 +184,6 @@ export async function setOpynOracleExpiryPrice(
   expiry: BigNumber,
   settlePrice: BigNumber
 ) {
-  await increaseTo(expiry.toNumber() + ORACLE_LOCKING_PERIOD + 1);
-
   const res = await oracle.setExpiryPrice(asset, expiry, settlePrice);
   const receipt = await res.wait();
   const timestamp = (await provider.getBlock(receipt.blockNumber)).timestamp;
@@ -273,12 +233,7 @@ export async function addMinter(
     params: [contractOwner],
   });
 
-  const forceSendContract = await ethers.getContractFactory("ForceSend");
-  const forceSend = await forceSendContract.deploy(); // Some contract do not have receive(), so we force send
-  await forceSend.deployed();
-  await forceSend.go(contractOwner, {
-    value: parseEther("10"),
-  });
+  await forceSend(contractOwner, "10");
 
   await contract.connect(tokenOwnerSigner).addMinter(minter);
 
@@ -302,12 +257,7 @@ export async function mintToken(
     params: [contractOwner],
   });
 
-  const forceSendContract = await ethers.getContractFactory("ForceSend");
-  const forceSend = await forceSendContract.deploy(); // Some contract do not have receive(), so we force send
-  await forceSend.deployed();
-  await forceSend.go(contractOwner, {
-    value: parseEther("10"),
-  });
+  await forceSend(contractOwner, "10");
 
   if (isBridgeToken(chainId, contract.address)) {
     // Avax mainnet uses BridgeTokens which have a special mint function
@@ -535,4 +485,82 @@ export const getPricerAsset = async (pricer: Contract) => {
     default:
       return await pricer.asset();
   }
+};
+
+export const getNextOptionReadyAt = async (vault: Contract) => {
+  const optionState = await vault.optionState();
+  return optionState.nextOptionReadyAt;
+};
+
+export const getCurrentOptionExpiry = async (vault: Contract) => {
+  const currentOption = await vault.currentOption();
+  const otoken = await getContractAt("IOtoken", currentOption);
+  return otoken.expiryTimestamp();
+};
+
+export const isDisputePeriodOver = async (asset: string, expiry: number) => {
+  await network.provider.request({
+    method: "hardhat_impersonateAccount",
+    params: [ORACLE_OWNER[chainId]],
+  });
+
+  const oracle = await ethers.getContractAt("IOracle", GAMMA_ORACLE[chainId]);
+  return oracle.isDisputePeriodOver(asset, expiry);
+};
+
+export const rollToNextOption = async (
+  vault: Contract,
+  strikeSelection: Contract
+) => {
+  const ownerSigner = await impersonate(await strikeSelection.owner());
+  const keeperSigner = await impersonate(await vault.keeper());
+
+  await sendEth(await ownerSigner.getAddress(), "10");
+
+  await vault.connect(keeperSigner).commitAndClose();
+  await strikeSelection.connect(ownerSigner).setDelta(BigNumber.from("1000"));
+  await vault.connect(keeperSigner).rollToNextOption();
+};
+
+export const forceSend = async (receiver: string, amount: string) => {
+  const forceSendContract = await ethers.getContractFactory("ForceSend");
+  const forceSend = await forceSendContract.deploy(); // Some contract do not have receive(), so we force send
+  await forceSend.deployed();
+  await forceSend.go(receiver, {
+    value: parseEther(amount),
+  });
+};
+
+export const sendEth = async (receiver: string, amount: string) => {
+  const WHALE_WALLET = {
+    [CHAINID.ETH_MAINNET]: "0x72a53cdbbcc1b9efa39c834a540550e23463aacb",
+    [CHAINID.AVAX_MAINNET]: "0x4aefa39caeadd662ae31ab0ce7c8c2c9c0a013e8",
+  };
+  const whaleSigner = await impersonate(WHALE_WALLET[chainId]);
+  await whaleSigner.sendTransaction({
+    to: receiver,
+    value: parseEther(amount),
+  });
+};
+
+export const impersonate = async (address: string) => {
+  await network.provider.request({
+    method: "hardhat_impersonateAccount",
+    params: [address],
+  });
+  return await provider.getSigner(address);
+};
+
+export const resetBlock = async (jsonRpcUrl: string, blockNumber: number) => {
+  await network.provider.request({
+    method: "hardhat_reset",
+    params: [
+      {
+        forking: {
+          jsonRpcUrl,
+          blockNumber,
+        },
+      },
+    ],
+  });
 };
