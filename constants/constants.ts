@@ -98,6 +98,7 @@ export const SAVAX_OWNER_ADDRESS = {
 
 export const APE_ADDRESS = {
   [CHAINID.ETH_MAINNET]: "0x4d224452801ACEd8B2F0aebE155379bb5D594381",
+  [CHAINID.ETH_KOVAN]: "0xdafa53b505b5d9b2d19701f8dda0b07941b2a461",
 };
 
 export const APE_OWNER_ADDRESS = {
@@ -178,9 +179,6 @@ export const PERP_PRICE_ORACLE = {
   [CHAINID.ETH_KOVAN]: "0x9326BFA02ADD2366b30bacB125260Af641031331", //NOTE: Unofficial, use only for deployment testing
 };
 
-export const APE_PRICE_ORACLE = {
-  [CHAINID.AURORA_MAINNET]: "FIXME",
-};
 /**
  * Yearn Pricers / Reference contracts
  */
